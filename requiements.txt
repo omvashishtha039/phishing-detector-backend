@@ -1,5 +1,0 @@
-Flask
-gunicorn
-flask-jwt-extended
-flask-mysqldb
-requests
