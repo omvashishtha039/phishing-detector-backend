@@ -1,158 +1,118 @@
 from flask import Flask, request, jsonify
+from werkzeug.security import generate_password_hash, check_password_hash
 from flask_jwt_extended import JWTManager, create_access_token, jwt_required, get_jwt_identity
-from flask_sqlalchemy import SQLAlchemy
-from flask_cors import CORS
+from flask_mysqldb import MySQL
+from flask_cors import CORS  
 import requests
-import datetime
-import hashlib
-import os
 
 app = Flask(__name__)
-CORS(app)
+CORS(app, supports_credentials=True)  # ✅ Allow CORS with credentials
 
-# 🔹 PostgreSQL Configuration (Replace with your actual Render database URL)
-app.config["SQLALCHEMY_DATABASE_URI"] = "postgresql://phishing_detector_user:eeWmk2IW9pTXqrap4F6bDFGW87i1DQZv@dpg-cvguq0dumphs73d02r7g-a/phishing_detector"
-app.config["SQLALCHEMY_TRACK_MODIFICATIONS"] = False
+# 🔹 MySQL Configuration
+app.config["MYSQL_HOST"] = "localhost"
+app.config["MYSQL_USER"] = "root"
+app.config["MYSQL_PASSWORD"] = "FOMM04122004"
+app.config["MYSQL_DB"] = "phishing_detector"
+app.config["MYSQL_CURSORCLASS"] = "DictCursor"
 
-db = SQLAlchemy(app)
+mysql = MySQL(app)
 
 # 🔹 JWT Configuration
-app.config["JWT_SECRET_KEY"] = os.getenv("JWT_SECRET_KEY", "FOMM04122004@CyberSecurity")
+app.config["JWT_SECRET_KEY"] = "FOMM04122004@CyberSecurity"
 jwt = JWTManager(app)
 
 # 🔹 Google Safe Browsing API Configuration
-GOOGLE_API_KEY = os.getenv("GOOGLE_SAFE_BROWSING_API_KEY", "YOUR_GOOGLE_API_KEY_HERE")
+GOOGLE_API_KEY = "AIzaSyCBHBBeln-E6fSLMt4r6QGlstGEKvmG9jY"
 GOOGLE_SAFE_BROWSING_URL = "https://safebrowsing.googleapis.com/v4/threatMatches:find"
 
-# ---------------------- DATABASE MODELS ----------------------
-class User(db.Model):
-    id = db.Column(db.Integer, primary_key=True)
-    email = db.Column(db.String(100), unique=True, nullable=False)
-    password_hash = db.Column(db.String(256), nullable=False)
 
-class Scan(db.Model):
-    id = db.Column(db.Integer, primary_key=True)
-    user_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
-    url = db.Column(db.String(500), nullable=False)
-    status = db.Column(db.String(20), nullable=False)
-    scan_date = db.Column(db.DateTime, default=datetime.datetime.utcnow)
-
-# Create Tables
-with app.app_context():
-    db.create_all()
-
-# ---------------------- 1️⃣ HOME ROUTE ----------------------
 @app.route('/')
 def home():
-    return jsonify({"message": "Backend is running successfully with PostgreSQL!"}), 200
+    return jsonify({"message": "Backend is running successfully!"}), 200
 
-# ---------------------- 2️⃣ USER REGISTRATION ----------------------
-@app.route("/signup", methods=["POST"])
+
+# ---------------------- 1️⃣ USER REGISTRATION ----------------------
+@app.route('/signup', methods=['POST'])
 def signup():
-    data = request.get_json()
-    email = data.get("email")
-    password = data.get("password")
+    data = request.get_json() or request.form
+    if not data or not all(k in data for k in ["name", "email", "password"]):
+        return jsonify({"error": "Missing fields"}), 400
 
-    if not email or not password:
-        return jsonify({"error": "Email and password are required!"}), 400
+    hashed_password = generate_password_hash(data["password"])  # Encrypt password
 
-    hashed_password = hashlib.sha256(password.encode()).hexdigest()
+    cursor = mysql.connection.cursor()
+    cursor.execute("INSERT INTO users (name, email, password) VALUES (%s, %s, %s)", 
+                   (data["name"], data["email"], hashed_password))
+    mysql.connection.commit()
+    cursor.close()
+    
+    return jsonify({"message": "Signup successful!"}), 201
 
-    existing_user = User.query.filter_by(email=email).first()
-    if existing_user:
-        return jsonify({"error": "User already exists!"}), 409
 
-    new_user = User(email=email, password_hash=hashed_password)
-    db.session.add(new_user)
-    db.session.commit()
-
-    return jsonify({"message": "User registered successfully!"}), 201
-
-# ---------------------- 3️⃣ USER LOGIN (JWT TOKEN) ----------------------
-@app.route("/login", methods=["POST"])
+# ---------------------- 2️⃣ USER LOGIN (JWT TOKEN) ----------------------
+@app.route('/login', methods=['POST'])
 def login():
-    data = request.get_json()
-    email = data.get("email")
-    password = data.get("password")
+    data = request.get_json() or request.form
+    if not data or not all(k in data for k in ["email", "password"]):
+        return jsonify({"error": "Missing credentials"}), 400
 
-    if not email or not password:
-        return jsonify({"error": "Email and password are required!"}), 400
+    cursor = mysql.connection.cursor()
+    cursor.execute("SELECT * FROM users WHERE email=%s", (data["email"],))
+    user = cursor.fetchone()
+    cursor.close()
 
-    hashed_password = hashlib.sha256(password.encode()).hexdigest()
-    user = User.query.filter_by(email=email, password_hash=hashed_password).first()
-
-    if user:
-        access_token = create_access_token(identity=str(user.id), expires_delta=datetime.timedelta(days=1))
+    if user and check_password_hash(user["password"], data["password"]):
+        access_token = create_access_token(identity=user["id"])
         return jsonify({"message": "Login successful!", "token": access_token}), 200
-    else:
-        return jsonify({"error": "Invalid email or password"}), 401
+    return jsonify({"message": "Invalid email or password!"}), 401
 
-# ---------------------- 4️⃣ SCAN URL (JWT PROTECTED) ----------------------
-@app.route("/scan", methods=["POST"])
-@jwt_required()
+
+# ---------------------- 3️⃣ SCAN URL (JWT PROTECTED) ----------------------
+@app.route('/scan', methods=['POST'])
 def scan_url():
-    data = request.get_json()
-    url = data.get("url")
-    user_id = get_jwt_identity()
-
-    if not url:
-        return jsonify({"error": "URL is required!"}), 400
-
-    payload = {
-        "client": {"clientId": "yourcompany", "clientVersion": "1.0"},
-        "threatInfo": {
-            "threatTypes": ["MALWARE", "SOCIAL_ENGINEERING"],
-            "platformTypes": ["ANY_PLATFORM"],
-            "threatEntryTypes": ["URL"],
-            "threatEntries": [{"url": url}],
-        },
-    }
-
     try:
-        response = requests.post(GOOGLE_SAFE_BROWSING_URL, params={"key": GOOGLE_API_KEY}, json=payload)
-        result = response.json()
+        data = request.get_json()
+        if not data or 'url' not in data:
+            return jsonify({"error": "Missing URL"}), 400
 
-        # Determine scan result
-        if "matches" in result:
-            status = "dangerous"
-            message = "⚠️ This URL is a phishing/malicious site!"
-        else:
-            status = "safe"
-            message = "✅ This URL is safe!"
+        url = data["url"]
+        
+        # Placeholder logic for phishing detection
+        safe = "phishing" not in url.lower()  # Example detection logic
 
-        # 🔹 Store Scan History in MySQL
-        cursor = mysql.connection.cursor()
-        cursor.execute("INSERT INTO scans (user_id, url, status) VALUES (%s, %s, %s)", (user_id, url, status))
-        mysql.connection.commit()
-        cursor.close()
+        return jsonify({"safe": safe})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
-        return jsonify({"status": status, "message": message, "scan_data": result})
-
-    except requests.exceptions.RequestException as e:
-        return jsonify({"error": "Google Safe Browsing API error: " + str(e)}), 500
-
-
-
-# ---------------------- 5️⃣ FETCH SCAN HISTORY (JWT PROTECTED) ----------------------
+if __name__ == '__main__':
+    app.run(debug=True)
+    
+# ---------------------- 4️⃣ FETCH SCAN HISTORY ----------------------
 @app.route("/scan-history", methods=["GET"])
 @jwt_required()
 def get_scan_history():
     user_id = get_jwt_identity()
-    history = Scan.query.filter_by(user_id=user_id).order_by(Scan.scan_date.desc()).all()
-    
-    scan_data = [{"id": scan.id, "url": scan.url, "status": scan.status, "scan_date": scan.scan_date.strftime("%Y-%m-%d %H:%M:%S")} for scan in history]
 
-    return jsonify({"scan_history": scan_data})
+    cursor = mysql.connection.cursor()
+    cursor.execute("SELECT url, status, DATE_FORMAT(scan_date, '%%Y-%%m-%%d %%H:%%i:%%s') as scan_date FROM scans WHERE user_id = %s ORDER BY scan_date DESC", (user_id,))
+    history = cursor.fetchall()
+    cursor.close()
 
-# ---------------------- 6️⃣ TEST DATABASE CONNECTION ----------------------
+    return jsonify({"scan_history": history})
+
+
+# ---------------------- 5️⃣ TEST DATABASE CONNECTION ----------------------
 @app.route("/test-db")
 def test_db():
     try:
-        db.session.execute("SELECT 1")
-        return jsonify({"message": "Connected to PostgreSQL successfully!"}), 200
+        cursor = mysql.connection.cursor()
+        cursor.execute("SELECT DATABASE();")
+        db_name = cursor.fetchone()
+        return jsonify({"message": f"Connected to database: {db_name['DATABASE()']}"}), 200
     except Exception as e:
-        return jsonify({"error": "Database connection error: " + str(e)}), 500
+        return jsonify({"error": "Database connection error", "details": str(e)}), 500
 
-# ---------------------- 7️⃣ RUN FLASK APP ----------------------
+
+# ---------------------- 6️⃣ RUN FLASK APP ----------------------
 if __name__ == "__main__":
     app.run(debug=True)
